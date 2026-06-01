@@ -186,6 +186,65 @@ app.post('/sections/get-or-create', async (req, res) => {
   }
 });
 
+// Create a single task against the Todoist API. Returns a per-item result object.
+async function createTask({ content, title, description, dueDate, projectId, sectionId }) {
+  const taskContent = content ?? title;
+  if (!taskContent) return { ok: false, error: 'content (or title) required' };
+  if (!projectId) return { ok: false, error: 'projectId required' };
+
+  const body = { content: taskContent, project_id: projectId };
+  if (description) body.description = description;
+  if (dueDate) body.due_date = dueDate;
+  if (sectionId) body.section_id = sectionId;
+
+  const r = await fetch(`${API}/tasks`, { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
+  const data = await r.json();
+  if (!r.ok) return { ok: false, error: data };
+  return { ok: true, taskId: data.id };
+}
+
+// POST /tasks/batch
+// Body: { tasks: [{ content|title, projectId, description?, dueDate?, sectionId? }, ...] }
+// Returns: { ok, created, failed, results: [...] } — 207-style: each item reports its own ok.
+app.post('/tasks/batch', async (req, res) => {
+  try {
+    const tasks = req.body?.tasks;
+    if (!Array.isArray(tasks) || tasks.length === 0) {
+      return res.status(400).json({ ok: false, error: 'tasks array required' });
+    }
+    const results = [];
+    for (const t of tasks) results.push(await createTask(t));
+    const created = results.filter(r => r.ok).length;
+    res.json({ ok: created > 0, created, failed: results.length - created, results });
+  } catch (e) {
+    console.warn('[todoist] POST /tasks/batch error:', e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// POST /tasks/batch-close
+// Body: { ids: [taskId, ...] }
+// Returns: { ok, closed, failed, results: [{ id, ok, error? }, ...] }
+app.post('/tasks/batch-close', async (req, res) => {
+  try {
+    const ids = req.body?.ids;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ ok: false, error: 'ids array required' });
+    }
+    const results = [];
+    for (const id of ids) {
+      const r = await fetch(`${API}/tasks/${id}/close`, { method: 'POST', headers: authHeaders() });
+      if (r.ok) results.push({ id, ok: true });
+      else results.push({ id, ok: false, error: await r.json().catch(() => r.statusText) });
+    }
+    const closed = results.filter(r => r.ok).length;
+    res.json({ ok: closed > 0, closed, failed: results.length - closed, results });
+  } catch (e) {
+    console.warn('[todoist] POST /tasks/batch-close error:', e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // GET /health — token presence check for callers / monitoring.
 app.get('/health', (req, res) => {
   res.json({ ok: true, tokenConfigured: Boolean(process.env.TODOIST_API_TOKEN) });
