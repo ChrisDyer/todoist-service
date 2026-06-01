@@ -7,6 +7,10 @@ app.use(express.json());
 const API = 'https://api.todoist.com/api/v1';
 const PORT = process.env.PORT ?? 3010;
 
+if (!process.env.TODOIST_API_TOKEN) {
+  console.warn('[todoist] WARNING: TODOIST_API_TOKEN is not set — all upstream calls will 401.');
+}
+
 function authHeaders() {
   return {
     Authorization: `Bearer ${process.env.TODOIST_API_TOKEN}`,
@@ -19,14 +23,14 @@ function authHeaders() {
 app.get('/tasks', async (req, res) => {
   try {
     const { projectId } = req.query
-    if (!projectId) return res.json({ ok: false, error: 'projectId required' })
+    if (!projectId) return res.status(400).json({ ok: false, error: 'projectId required' })
     const r = await fetch(`${API}/tasks?project_id=${projectId}`, { headers: authHeaders() })
     const data = await r.json()
-    if (!r.ok) return res.json({ ok: false, error: data })
+    if (!r.ok) return res.status(r.status).json({ ok: false, error: data })
     res.json({ ok: true, tasks: data.results ?? data })
   } catch (e) {
     console.warn('[todoist] GET /tasks error:', e.message)
-    res.json({ ok: false, error: e.message })
+    res.status(500).json({ ok: false, error: e.message })
   }
 })
 
@@ -36,11 +40,11 @@ app.get('/tasks/:id', async (req, res) => {
   try {
     const r = await fetch(`${API}/tasks/${req.params.id}`, { headers: authHeaders() })
     const data = await r.json()
-    if (!r.ok) return res.json({ ok: false, error: data })
+    if (!r.ok) return res.status(r.status).json({ ok: false, error: data })
     res.json({ ok: true, task: data })
   } catch (e) {
     console.warn('[todoist] GET /tasks/:id error:', e.message)
-    res.json({ ok: false, error: e.message })
+    res.status(500).json({ ok: false, error: e.message })
   }
 })
 
@@ -50,7 +54,11 @@ app.get('/tasks/:id', async (req, res) => {
 app.post('/tasks', async (req, res) => {
   try {
     const { content, title, description, dueDate, projectId, sectionId } = req.body;
-    const body = { content: content ?? title, project_id: projectId };
+    const taskContent = content ?? title;
+    if (!taskContent) return res.status(400).json({ ok: false, error: 'content (or title) required' });
+    if (!projectId) return res.status(400).json({ ok: false, error: 'projectId required' });
+
+    const body = { content: taskContent, project_id: projectId };
     if (description) body.description = description;
     if (dueDate) body.due_date = dueDate;
     if (sectionId) body.section_id = sectionId;
@@ -63,12 +71,12 @@ app.post('/tasks', async (req, res) => {
     const data = await r.json();
     if (!r.ok) {
       console.warn('[todoist] create task failed:', data);
-      return res.json({ ok: false, error: data });
+      return res.status(r.status).json({ ok: false, error: data });
     }
     res.json({ ok: true, taskId: data.id });
   } catch (e) {
     console.warn('[todoist] POST /tasks error:', e.message);
-    res.json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -83,12 +91,12 @@ app.post('/tasks/:id/close', async (req, res) => {
     if (!r.ok) {
       const data = await r.json();
       console.warn('[todoist] close task failed:', data);
-      return res.json({ ok: false, error: data });
+      return res.status(r.status).json({ ok: false, error: data });
     }
     res.json({ ok: true });
   } catch (e) {
     console.warn('[todoist] POST /tasks/:id/close error:', e.message);
-    res.json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -111,12 +119,12 @@ app.patch('/tasks/:id', async (req, res) => {
     const data = await r.json();
     if (!r.ok) {
       console.warn('[todoist] update task failed:', data);
-      return res.json({ ok: false, error: data });
+      return res.status(r.status).json({ ok: false, error: data });
     }
     res.json({ ok: true });
   } catch (e) {
     console.warn('[todoist] PATCH /tasks/:id error:', e.message);
-    res.json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -131,12 +139,12 @@ app.delete('/tasks/:id', async (req, res) => {
     if (!r.ok) {
       const data = await r.json();
       console.warn('[todoist] delete task failed:', data);
-      return res.json({ ok: false, error: data });
+      return res.status(r.status).json({ ok: false, error: data });
     }
     res.json({ ok: true });
   } catch (e) {
     console.warn('[todoist] DELETE /tasks/:id error:', e.message);
-    res.json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -146,11 +154,16 @@ app.delete('/tasks/:id', async (req, res) => {
 app.post('/sections/get-or-create', async (req, res) => {
   try {
     const { name, projectId } = req.body;
+    if (!name || !projectId) return res.status(400).json({ ok: false, error: 'name and projectId required' });
 
     const listRes = await fetch(`${API}/sections?project_id=${projectId}`, {
       headers: authHeaders(),
     });
     const listData = await listRes.json();
+    if (!listRes.ok) {
+      console.warn('[todoist] list sections failed:', listData);
+      return res.status(listRes.status).json({ ok: false, error: listData });
+    }
     const sections = listData.results ?? [];
 
     const existing = sections.find(s => s.name === name);
@@ -164,13 +177,18 @@ app.post('/sections/get-or-create', async (req, res) => {
     const newSection = await createRes.json();
     if (!createRes.ok) {
       console.warn('[todoist] create section failed:', newSection);
-      return res.json({ ok: false, error: newSection });
+      return res.status(createRes.status).json({ ok: false, error: newSection });
     }
     res.json({ ok: true, sectionId: newSection.id });
   } catch (e) {
     console.warn('[todoist] POST /sections/get-or-create error:', e.message);
-    res.json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: e.message });
   }
+});
+
+// GET /health — token presence check for callers / monitoring.
+app.get('/health', (req, res) => {
+  res.json({ ok: true, tokenConfigured: Boolean(process.env.TODOIST_API_TOKEN) });
 });
 
 app.listen(PORT, () => console.log(`todoist-service running on :${PORT}`));
