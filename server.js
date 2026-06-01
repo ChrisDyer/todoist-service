@@ -7,6 +7,17 @@ app.use(express.json());
 const API = 'https://api.todoist.com/api/v1';
 const PORT = process.env.PORT ?? 3010;
 
+// This service can mutate Todoist state, so require Cloudflare Access' identity
+// header unless explicitly disabled for local smoke tests.
+if (process.env.ALLOW_NO_ACCESS_HEADER !== '1') {
+  app.use((req, res, next) => {
+    if (!req.headers['cf-access-authenticated-user-email']) {
+      return res.status(403).json({ ok: false, error: 'Forbidden' });
+    }
+    next();
+  });
+}
+
 if (!process.env.TODOIST_API_TOKEN) {
   console.warn('[todoist] WARNING: TODOIST_API_TOKEN is not set — all upstream calls will 401.');
 }
@@ -18,14 +29,24 @@ function authHeaders() {
   };
 }
 
+async function readJson(response) {
+  const text = await response.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
 // GET /tasks?projectId=X
 // Returns: { ok: true, tasks: [...] } | { ok: false, error }
 app.get('/tasks', async (req, res) => {
   try {
     const { projectId } = req.query
     if (!projectId) return res.status(400).json({ ok: false, error: 'projectId required' })
-    const r = await fetch(`${API}/tasks?project_id=${projectId}`, { headers: authHeaders() })
-    const data = await r.json()
+    const r = await fetch(`${API}/tasks?project_id=${encodeURIComponent(projectId)}`, { headers: authHeaders() })
+    const data = await readJson(r)
     if (!r.ok) return res.status(r.status).json({ ok: false, error: data })
     res.json({ ok: true, tasks: data.results ?? data })
   } catch (e) {
@@ -38,8 +59,8 @@ app.get('/tasks', async (req, res) => {
 // Returns: { ok: true, task: {...} } | { ok: false, error }
 app.get('/tasks/:id', async (req, res) => {
   try {
-    const r = await fetch(`${API}/tasks/${req.params.id}`, { headers: authHeaders() })
-    const data = await r.json()
+    const r = await fetch(`${API}/tasks/${encodeURIComponent(req.params.id)}`, { headers: authHeaders() })
+    const data = await readJson(r)
     if (!r.ok) return res.status(r.status).json({ ok: false, error: data })
     res.json({ ok: true, task: data })
   } catch (e) {
@@ -68,7 +89,7 @@ app.post('/tasks', async (req, res) => {
       headers: authHeaders(),
       body: JSON.stringify(body),
     });
-    const data = await r.json();
+    const data = await readJson(r);
     if (!r.ok) {
       console.warn('[todoist] create task failed:', data);
       return res.status(r.status).json({ ok: false, error: data });
@@ -84,12 +105,12 @@ app.post('/tasks', async (req, res) => {
 // Returns: { ok: true } | { ok: false, error }
 app.post('/tasks/:id/close', async (req, res) => {
   try {
-    const r = await fetch(`${API}/tasks/${req.params.id}/close`, {
+    const r = await fetch(`${API}/tasks/${encodeURIComponent(req.params.id)}/close`, {
       method: 'POST',
       headers: authHeaders(),
     });
     if (!r.ok) {
-      const data = await r.json();
+      const data = await readJson(r);
       console.warn('[todoist] close task failed:', data);
       return res.status(r.status).json({ ok: false, error: data });
     }
@@ -111,12 +132,12 @@ app.patch('/tasks/:id', async (req, res) => {
     if (description !== undefined) body.description = description;
     if (dueDate !== undefined) body.due_date = dueDate;
 
-    const r = await fetch(`${API}/tasks/${req.params.id}`, {
+    const r = await fetch(`${API}/tasks/${encodeURIComponent(req.params.id)}`, {
       method: 'POST',
       headers: authHeaders(),
       body: JSON.stringify(body),
     });
-    const data = await r.json();
+    const data = await readJson(r);
     if (!r.ok) {
       console.warn('[todoist] update task failed:', data);
       return res.status(r.status).json({ ok: false, error: data });
@@ -132,12 +153,12 @@ app.patch('/tasks/:id', async (req, res) => {
 // Returns: { ok: true } | { ok: false, error }
 app.delete('/tasks/:id', async (req, res) => {
   try {
-    const r = await fetch(`${API}/tasks/${req.params.id}`, {
+    const r = await fetch(`${API}/tasks/${encodeURIComponent(req.params.id)}`, {
       method: 'DELETE',
       headers: authHeaders(),
     });
     if (!r.ok) {
-      const data = await r.json();
+      const data = await readJson(r);
       console.warn('[todoist] delete task failed:', data);
       return res.status(r.status).json({ ok: false, error: data });
     }
@@ -156,10 +177,10 @@ app.post('/sections/get-or-create', async (req, res) => {
     const { name, projectId } = req.body;
     if (!name || !projectId) return res.status(400).json({ ok: false, error: 'name and projectId required' });
 
-    const listRes = await fetch(`${API}/sections?project_id=${projectId}`, {
+    const listRes = await fetch(`${API}/sections?project_id=${encodeURIComponent(projectId)}`, {
       headers: authHeaders(),
     });
-    const listData = await listRes.json();
+    const listData = await readJson(listRes);
     if (!listRes.ok) {
       console.warn('[todoist] list sections failed:', listData);
       return res.status(listRes.status).json({ ok: false, error: listData });
@@ -174,7 +195,7 @@ app.post('/sections/get-or-create', async (req, res) => {
       headers: authHeaders(),
       body: JSON.stringify({ name, project_id: projectId }),
     });
-    const newSection = await createRes.json();
+    const newSection = await readJson(createRes);
     if (!createRes.ok) {
       console.warn('[todoist] create section failed:', newSection);
       return res.status(createRes.status).json({ ok: false, error: newSection });
