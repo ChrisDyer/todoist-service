@@ -77,31 +77,19 @@ app.get('/tasks/:id', async (req, res) => {
 })
 
 // POST /tasks
-// Body: { content, title (alias), description?, dueDate?, projectId, sectionId? }
-// Returns: { ok: true, taskId } | { ok: false, error }
+// Body: { content, title (alias), description?, dueDate?, deadlineDate?, priority?, projectId, sectionId? }
+// deadlineDate is Todoist's hard "deadline" (YYYY-MM-DD), distinct from the due date;
+// priority is Todoist-native (1 = normal … 4 = urgent). Both are dropped with a retry
+// if the account's plan rejects them (deadlines are Pro-only) — see createTask().
+// Returns: { ok: true, taskId, deadlineDropped? } | { ok: false, error }
 app.post('/tasks', async (req, res) => {
   try {
-    const { content, title, description, dueDate, projectId, sectionId } = req.body;
-    const taskContent = content ?? title;
-    if (!taskContent) return res.status(400).json({ ok: false, error: 'content (or title) required' });
-    if (!projectId) return res.status(400).json({ ok: false, error: 'projectId required' });
-
-    const body = { content: taskContent, project_id: projectId };
-    if (description) body.description = description;
-    if (dueDate) body.due_date = dueDate;
-    if (sectionId) body.section_id = sectionId;
-
-    const r = await fetch(`${API}/tasks`, {
-      method: 'POST',
-      headers: authHeaders(),
-      body: JSON.stringify(body),
-    });
-    const data = await readJson(r);
-    if (!r.ok) {
-      console.warn('[todoist] create task failed:', data);
-      return res.status(r.status).json({ ok: false, error: data });
+    const result = await createTask(req.body);
+    if (!result.ok) {
+      console.warn('[todoist] create task failed:', result.error);
+      return res.status(result.status ?? 500).json({ ok: false, error: result.error });
     }
-    res.json({ ok: true, taskId: data.id });
+    res.json(result);
   } catch (e) {
     console.warn('[todoist] POST /tasks error:', e.message);
     res.status(500).json({ ok: false, error: e.message });
@@ -129,27 +117,41 @@ app.post('/tasks/:id/close', async (req, res) => {
 });
 
 // PATCH /tasks/:id
-// Body: { content?, description?, dueDate? }
-// Returns: { ok: true } | { ok: false, error }
+// Body: { content?, description?, dueDate?, deadlineDate?, priority? }
+// deadlineDate: YYYY-MM-DD or null to clear; priority is Todoist-native (1–4).
+// If the plan rejects the deadline (Pro-only), retries the update without it.
+// Returns: { ok: true, deadlineDropped? } | { ok: false, error }
 app.patch('/tasks/:id', async (req, res) => {
   try {
-    const { content, description, dueDate } = req.body;
+    const { content, description, dueDate, deadlineDate, priority } = req.body;
     const body = {};
     if (content !== undefined) body.content = content;
     if (description !== undefined) body.description = description;
     if (dueDate !== undefined) body.due_date = dueDate;
+    if (deadlineDate !== undefined) body.deadline_date = deadlineDate;
+    if (priority !== undefined) body.priority = priority;
 
-    const r = await fetch(`${API}/tasks/${encodeURIComponent(req.params.id)}`, {
+    const url = `${API}/tasks/${encodeURIComponent(req.params.id)}`;
+    let r = await fetch(url, {
       method: 'POST',
       headers: authHeaders(),
       body: JSON.stringify(body),
     });
-    const data = await readJson(r);
+    let data = await readJson(r);
+    let deadlineDropped = false;
+    if (!r.ok && 'deadline_date' in body && isPremiumOnlyError(data)) {
+      console.warn('[todoist] deadline_date rejected (premium only) — retrying update without it');
+      delete body.deadline_date;
+      deadlineDropped = true;
+      if (Object.keys(body).length === 0) return res.json({ ok: true, deadlineDropped });
+      r = await fetch(url, { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
+      data = await readJson(r);
+    }
     if (!r.ok) {
       console.warn('[todoist] update task failed:', data);
       return res.status(r.status).json({ ok: false, error: data });
     }
-    res.json({ ok: true });
+    res.json(deadlineDropped ? { ok: true, deadlineDropped } : { ok: true });
   } catch (e) {
     console.warn('[todoist] PATCH /tasks/:id error:', e.message);
     res.status(500).json({ ok: false, error: e.message });
@@ -214,25 +216,42 @@ app.post('/sections/get-or-create', async (req, res) => {
   }
 });
 
+// Todoist rejects plan-gated fields (e.g. deadlines on the free plan) with this error.
+function isPremiumOnlyError(data) {
+  return data?.error_tag === 'PREMIUM_ONLY' || data?.error_code === 32;
+}
+
 // Create a single task against the Todoist API. Returns a per-item result object.
-async function createTask({ content, title, description, dueDate, projectId, sectionId }) {
+// If deadline_date is rejected as premium-only, retries without it so the task is
+// still created; the result then carries deadlineDropped: true.
+async function createTask({ content, title, description, dueDate, deadlineDate, priority, projectId, sectionId }) {
   const taskContent = content ?? title;
-  if (!taskContent) return { ok: false, error: 'content (or title) required' };
-  if (!projectId) return { ok: false, error: 'projectId required' };
+  if (!taskContent) return { ok: false, status: 400, error: 'content (or title) required' };
+  if (!projectId) return { ok: false, status: 400, error: 'projectId required' };
 
   const body = { content: taskContent, project_id: projectId };
   if (description) body.description = description;
   if (dueDate) body.due_date = dueDate;
+  if (deadlineDate) body.deadline_date = deadlineDate;
+  if (priority) body.priority = priority;
   if (sectionId) body.section_id = sectionId;
 
-  const r = await fetch(`${API}/tasks`, { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
-  const data = await r.json();
-  if (!r.ok) return { ok: false, error: data };
-  return { ok: true, taskId: data.id };
+  let r = await fetch(`${API}/tasks`, { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
+  let data = await readJson(r);
+  let deadlineDropped = false;
+  if (!r.ok && body.deadline_date && isPremiumOnlyError(data)) {
+    console.warn('[todoist] deadline_date rejected (premium only) — retrying without it');
+    delete body.deadline_date;
+    deadlineDropped = true;
+    r = await fetch(`${API}/tasks`, { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
+    data = await readJson(r);
+  }
+  if (!r.ok) return { ok: false, status: r.status, error: data };
+  return deadlineDropped ? { ok: true, taskId: data.id, deadlineDropped } : { ok: true, taskId: data.id };
 }
 
 // POST /tasks/batch
-// Body: { tasks: [{ content|title, projectId, description?, dueDate?, sectionId? }, ...] }
+// Body: { tasks: [{ content|title, projectId, description?, dueDate?, deadlineDate?, priority?, sectionId? }, ...] }
 // Returns: { ok, created, failed, results: [...] } — 207-style: each item reports its own ok.
 app.post('/tasks/batch', async (req, res) => {
   try {
