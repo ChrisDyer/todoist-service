@@ -3,7 +3,8 @@
 Lightweight Express proxy for the Todoist REST API. Single file: `server.js`.
 
 - **Internal only** — listens on `localhost:3010` on the VPS; no nginx vhost, no
-  Cloudflare. Consumed server-to-server by `finance-app` (action items sync).
+  Cloudflare. Consumed server-to-server by `finance-app` (action items sync) and
+  `home-app` (maintenance-task two-way sync → "Home Maintenance" project, added 2026-07-16).
   (travel-app was previously listed as a consumer but has no Todoist integration —
   corrected 2026-07-16.)
 - No build step, no database. `npm install --omit=dev` is the whole setup.
@@ -27,3 +28,10 @@ Note: the GitHub repo (`ChrisDyer/todoist-service`) is currently **public** and 
 pulls over HTTPS. Nothing sensitive is tracked (`.env` is gitignored), but if the repo
 is made private, switch the VPS to a deploy key (see the pattern in the root `README.md`
 new-app checklist).
+
+## Plan folders
+
+If a multi-phase plan is ever needed for this app, put it under `docs/plans/<slug>/`
+with a `PROGRESS.md` per the convention in the root `CLAUDE.md`, register it in the
+root `projects.config.json` (path + `totalPhases`), and run
+`node tools/project-status.mjs` from the repo root.
