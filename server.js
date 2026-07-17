@@ -47,12 +47,15 @@ async function readJson(response) {
 }
 
 // GET /tasks?projectId=X
+// If projectId is omitted, returns all active tasks.
 // Returns: { ok: true, tasks: [...] } | { ok: false, error }
 app.get('/tasks', async (req, res) => {
   try {
     const { projectId } = req.query
-    if (!projectId) return res.status(400).json({ ok: false, error: 'projectId required' })
-    const r = await fetch(`${API}/tasks?project_id=${encodeURIComponent(projectId)}`, { headers: authHeaders() })
+    const url = projectId
+      ? `${API}/tasks?project_id=${encodeURIComponent(projectId)}`
+      : `${API}/tasks`
+    const r = await fetch(url, { headers: authHeaders() })
     const data = await readJson(r)
     if (!r.ok) return res.status(r.status).json({ ok: false, error: data })
     res.json({ ok: true, tasks: data.results ?? data })
