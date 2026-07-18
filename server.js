@@ -46,6 +46,20 @@ async function readJson(response) {
   }
 }
 
+function isIsoDate(value) {
+  if (value === null) return true;
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+function validateTaskDates({ dueDate, deadlineDate }) {
+  if (dueDate !== undefined && !isIsoDate(dueDate)) return 'dueDate must be YYYY-MM-DD';
+  if (deadlineDate !== undefined && !isIsoDate(deadlineDate)) return 'deadlineDate must be YYYY-MM-DD';
+  if (dueDate && deadlineDate && deadlineDate < dueDate) return 'deadlineDate must be on or after dueDate';
+  return null;
+}
+
 // GET /tasks?projectId=X
 // If projectId is omitted, returns all active tasks.
 // Returns: { ok: true, tasks: [...] } | { ok: false, error }
@@ -127,6 +141,8 @@ app.post('/tasks/:id/close', async (req, res) => {
 app.patch('/tasks/:id', async (req, res) => {
   try {
     const { content, description, dueDate, deadlineDate, priority } = req.body;
+    const dateError = validateTaskDates({ dueDate, deadlineDate });
+    if (dateError) return res.status(400).json({ ok: false, error: dateError });
     const body = {};
     if (content !== undefined) body.content = content;
     if (description !== undefined) body.description = description;
@@ -231,6 +247,8 @@ async function createTask({ content, title, description, dueDate, deadlineDate, 
   const taskContent = content ?? title;
   if (!taskContent) return { ok: false, status: 400, error: 'content (or title) required' };
   if (!projectId) return { ok: false, status: 400, error: 'projectId required' };
+  const dateError = validateTaskDates({ dueDate, deadlineDate });
+  if (dateError) return { ok: false, status: 400, error: dateError };
 
   const body = { content: taskContent, project_id: projectId };
   if (description) body.description = description;
@@ -300,4 +318,8 @@ app.get('/health', (req, res) => {
   res.json({ ok: true, tokenConfigured: Boolean(process.env.TODOIST_API_TOKEN) });
 });
 
-app.listen(PORT, () => console.log(`todoist-service running on :${PORT}`));
+if (process.env.NODE_ENV !== 'test') {
+  app.listen(PORT, () => console.log(`todoist-service running on :${PORT}`));
+}
+
+export { app, validateTaskDates };
